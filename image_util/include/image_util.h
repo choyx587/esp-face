@@ -36,6 +36,8 @@ extern "C"
 
 #define DL_IMAGE_MIN(A, B) ((A) < (B) ? (A) : (B))
 #define DL_IMAGE_MAX(A, B) ((A) < (B) ? (B) : (A))
+/* Clip macro function, MAX must be greater than MIN */
+#define CLIP(X, MAX, MIN) (X) > (MAX) ? (MAX) : ((X) < (MIN) ? (MIN) : (X))
 
 #define RGB565_MASK_RED 0xF800
 #define RGB565_MASK_GREEN 0x07E0
@@ -81,6 +83,15 @@ extern "C"
         image_box_t *origin_head; /*!< The original head of the image_list */
         int len;                  /*!< Length of the image_list */
     } image_list_t;
+
+    static const uint8_t color_channel_mask[][3] = {
+        {255, 0, 0},        /*<! red */
+        {0, 0, 255},        /*<! blue */
+        {0, 255, 0},        /*<! green */
+        {255, 255, 0},      /*<! yellow */
+        {0, 0, 0},          /*<! black */
+        {255, 255, 255},    /*<! white */
+    };  /*<! This is the color sequence corresponding to rgb888 */
 
     /**
      * @brief Get the width and height of the box.
@@ -257,6 +268,51 @@ extern "C"
     } /*}}}*/
 
     /**
+     * @brief Fill the 8 neighborhoods of a point on the rgb888/bgr888 image with color mask
+     *
+     * @note The current function interface does not generate a new image, and will modify the data on the input image
+     *
+     * @param dst_img           Pointer to input image
+     * @param w                 Input image width
+     * @param h                 Input image height
+     * @param center_x          The x of center point
+     * @param center_y          The y of center point
+     * @param c0                The data of 0th channel
+     * @param c1                The data of 1th channel
+     * @param c2                The data of 2th channel
+     */
+    static inline void draw_point(uint8_t *dst_img , int w, int h, int center_x, int center_y, size_t point_size, uint8_t c0, uint8_t c1, uint8_t c2)
+    {
+        /* *
+         *   1. When the point size is equal to 0, it is equivalent to a single point area filling
+         *
+         *   2. When the point size is equal to 1,  it is equivalent to an 8 neighborhood filling:
+         *
+         *                  x0y0   x1y0     x2y0
+         *                  x0y1   center   x2y1
+         *                  x0y2   x1y2     x2y2
+         *
+         * */
+
+        int x_min = CLIP(center_x - point_size, w - 1, 0);
+        int y_min = CLIP(center_y - point_size, h - 1, 0);
+        int x_max = CLIP(center_x + point_size, w - 1, 0);
+        int y_max = CLIP(center_y + point_size, h - 1, 0);
+
+        int stride = 3 * w;
+        for (int j = y_min; j < y_max; j++)
+        {
+            for (int i = x_min; i < x_max; i++)
+            {
+                uint8_t *item = dst_img + j * stride + i * 3;
+                item[0] = c0;
+                item[1] = c1;
+                item[2] = c2;
+            }
+        }
+    }
+
+    /**
      * @brief Filter out the resulting boxes whose confidence score is lower than the threshold and convert the boxes to the actual boxes on the original image.((x, y, w, h) -> (x1, y1, x2, y2))
      * 
      * @param score                    Confidence score of the boxes
@@ -285,6 +341,7 @@ extern "C"
                                         fptp_t resized_height_scale,
                                         fptp_t resized_width_scale,
                                         bool do_regression);
+
     /**
      * @brief Sort the resulting box lists by their confidence score.
      * 
@@ -533,8 +590,8 @@ extern "C"
      * @param dimage            Quantized output image. 
      * @param simage            Input image.
      * @param dw                Target size of the output image.
-     * @param sw                Width of the input image. 
-     * @param sh                Height of the input image. 
+     * @param sw                Width of the input image.
+     * @param sh                Height of the input image.
      * @param x1                The x coordinate of the upper left corner of the cropped area
      * @param y1                The y coordinate of the upper left corner of the cropped area
      * @param x2                The x coordinate of the lower right corner of the cropped area
@@ -542,6 +599,66 @@ extern "C"
      * @param shift             Shift parameter of quantization.
      */
     void image_crop_shift_fast(qtp_t *dimage, uint16_t *simage, int dw, int sw, int sh, int x1, int y1, int x2, int y2, int shift);
+
+    /**
+     * @brief Quickly zoom the cropped image
+     *
+     * @note  Memory space of dst_img must be allocated in advance
+     *
+     * @param dst_img           Pointer to resized image
+     * @param src_img           Pointer to origin image
+     * @param x_min             The x coordinate of the upper left corner of the cropped area
+     * @param y_min             The y coordinate of the upper left corner of the cropped area
+     * @param x_max             The x coordinate of the lower right corner of the cropped area
+     * @param y_max             The y coordinate of the lower right corner of the cropped area
+     * @param src_width         The width of origin image
+     * @param resize_w          The width of resized image
+     * @param resize_h          The height of resized image
+     */
+    void img_rgb888_crop_resize_fast(uint8_t *dst_img, uint8_t *src_img, int x_min, int y_min, int x_max, int y_max, int src_width, int resize_w , int resize_h);
+
+    /**
+     * @brief Universal image(YUV422, RGB88, BGR888, RGB565) cropper
+     *
+     * @note
+     *     1. src_channel is 2 corresponding to RGB565/YUV422 and 3 corresponds to RGB888/BGR888
+     *     2. The cropped image will first apply for space in internal RAM,
+     *        if the internal RAM space is insufficient, it will apply for space in PSRAM
+     *     3. The width of cropped image is equal to (x2 - x1 + 1)
+     *        The height of cropped image is equal to (y2 - y1 + 1), that means the start and end points are included in the calculation
+     *
+     * @param src_img           Pointer to input image
+     * @param x_min             The x coordinate of the upper left corner of the cropped area
+     * @param y_min             The y coordinate of the upper left corner of the cropped area
+     * @param x_max             The x coordinate of the lower right corner of the cropped area
+     * @param y_max             The y coordinate of the lower right corner of the cropped area
+     * @param src_width         The width of input image
+     * @param src_channel       The channel of input image
+     * @return                  Pointer to cropped image
+     */
+    uint8_t *image_crop(uint8_t *src_img, int x_min, int y_min, int x_max, int y_max, int src_width, int src_channel);
+
+    /**
+     * @brief Draw a line/point on the bgr888/rgb888 image by entering the start and end coordinates
+     *
+     * @note
+     *     1. The current function interface does not generate a new image, and will modify the data on the input image
+     *     2. If the coordinates of the start point and the end point are the same, the function will draw a point
+     *     3. If the distance between the start point y and the end point y is less than 3, the function will draw a horizontal straight line
+     *     4. Pixels are filled with 8-neighbors filling method. In some cases, a sense of jaggedness may appear
+     *
+     * @param src_img           Pointer to input image
+     * @param src_width         The width of input image
+     * @param src_height        The height of input image
+     * @param rgb_order         RGB order to determine whether it is rgb888 or bgr888
+     * @param x0                The x of start coordinate
+     * @param y0                The y of start coordinate
+     * @param x1                The x of end coordinate
+     * @param y1                The y of end coordinate
+     * @param line_size         Line size
+     * @param color             Pointer to three-channel color
+     */
+    void img_rgb888_draw_line(uint8_t *src_img, int src_width, int src_height, int x0, int y0, int x1, int y1, size_t line_size, uint8_t *color);
 
 #ifdef __cplusplus
 }
