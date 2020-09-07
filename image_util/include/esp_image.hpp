@@ -97,6 +97,22 @@ public:
     static void resize_to_rgb888(T *dst_image, int y_start, int y_end, int x_start, int x_end, int channel, uint8_t *src_image, int src_h, int src_w, int dst_w, int shift_left, image_resize_t type);
     // static void resize_to_rgb565(uint16_t *dst_image, int y_start, int y_end, int x_start, int x_end, int channel, uint16_t *src_image, int src_h, int src_w, int dst_w, int shift_left, image_resize_t type);
     // static void resize_to_rgb565(uint16_t *dst_image, int y_start, int y_end, int x_start, int x_end, int channel, uint8_t *src_image, int src_h, int src_w, int dst_w, int shift_left, image_resize_t type);
+
+    /**
+     * @brief Quickly zoom + normalize  the cropped image
+     *
+     * @param dst_img       Pointer to resized image
+     * @param src_img       Pointer to origin image
+     * @param x_start       The x coordinate of the upper left corner of the cropped area
+     * @param y_start       The y coordinate of the upper left corner of the cropped area
+     * @param x_end         The x coordinate of the lower right corner of the cropped area
+     * @param y_end         The y coordinate of the lower right corner of the cropped area
+     * @param src_width     The width of origin image
+     * @param resize_w      The width of resized image
+     * @param resize_h      The height of resized image
+     * @param offset        Offset
+     */
+    static void crop_and_resize_to_rgb888(T *dst_img, uint8_t *src_img, int x_start, int y_start, int x_end, int y_end, int src_width, int resize_w, int resize_h, int offset);
 };
 
 template <class T>
@@ -340,5 +356,33 @@ void Image<T>::resize_to_rgb888(T *dst_image, int y_start, int y_end, int x_star
 
     default:
         break;
+    }
+}
+
+template <class T>
+void Image<T>::crop_and_resize_to_rgb888(T *dst_img, uint8_t *src_img, int x_start, int y_start, int x_end, int y_end, int src_width, int resize_w, int resize_h, int offset)
+{
+    int crop_w = x_end - x_start + 1;
+    int crop_h = y_end - y_start + 1;
+    float dw = (float)crop_w / resize_w;
+    float dh = (float)crop_h / resize_h;
+    int16_t *item = dst_img;
+    int stride = src_width * 3;
+    for (int j = 0; j < resize_h; j++)
+    {
+        int y0 = ((int)(j * dh) + y_start) * stride;
+        int y1 = y0 + stride;
+        for (int i = 0; i < resize_w; i++)
+        {
+            int x0 = ((int)(i * dw) + x_start) * 3;
+            int x1 = x0 + 3;
+            /**
+              * desired point = (f(x0y0) + f(x1y0) + f(x0y1) + f(x1y1)) / 4
+            */
+            for (int c = 0; c < 3 ; c++)
+            {
+                *item++ = ((uint32_t)(src_img[x0 + y0 + c] + src_img[x1 + y0 + c] + src_img[x0 + y1 + c] + src_img[x1 + y1 + c]) >> 2) - offset;
+            }
+        }
     }
 }

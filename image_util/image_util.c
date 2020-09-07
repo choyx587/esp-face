@@ -30,6 +30,8 @@
 #include <string.h>
 #include "image_util.h"
 #include "esp_timer.h"
+#include "esp_heap_caps.h"
+#include "esp_log.h"
 
 void image_zoom_in_twice(uint8_t *dimage,
                          int dw,
@@ -1887,7 +1889,6 @@ void image_resize_shift_fast(qtp_t *dimage, uint16_t *simage, int dw, int dc, in
     return;
 }
 
-
 void image_resize_nearest_shift(qtp_t *dimage, uint16_t *simage, int dw, int dc, int sw, int sh, int tw, int th, int shift)
 {
     assert(shift>=0);
@@ -1956,4 +1957,153 @@ void image_crop_shift_fast(qtp_t *dimage, uint16_t *simage, int dw, int sw, int 
         }
     }
     return;
+}
+
+void img_rgb888_crop_resize_fast(
+    uint8_t *dst_img,
+    uint8_t *src_img,
+    int x_min, int y_min, int x_max, int y_max,
+    int src_width,
+    int resize_w , int resize_h)
+{
+    int crop_w = x_max - x_min + 1;
+    int crop_h = y_max - y_min + 1;
+    float dw = (float)crop_w / resize_w;
+    float dh = (float)crop_h / resize_h;
+    uint8_t *item = dst_img;
+    int stride = src_width * 3;
+    for (int j = 0; j < resize_h; j++)
+    {
+        int y0 = ((int)(j * dh) + y_min) * stride;
+        int y1 = y0 + stride;
+        for (int i = 0; i < resize_w; i++)
+        {
+            int x0 = ((int)(i * dw) + x_min) * 3;
+            int x1 = x0 + 3;
+            /**
+             * desired point = (f(x0y0) + f(x1y0) + f(x0y1) + f(x1y1)) / 4
+             */
+             for (int c = 0; c < 3 ; c++)
+             {
+                 *item++ = (uint32_t)(src_img[x0 + y0 + c] + src_img[x1 + y0 + c] + src_img[x0 + y1 + c] + src_img[x1 + y1 + c]) >> 2;
+             }
+        }
+    }
+}
+
+uint8_t *image_crop(uint8_t *src_img, int x_min, int y_min, int x_max, int y_max, int src_width, int src_channel)
+{
+    int dst_width = x_max - x_min + 1;
+    int dst_height = y_max - y_min + 1;
+
+    uint8_t *dst_img = (uint8_t *)malloc(dst_width * dst_height * src_channel * sizeof(uint8_t));
+    if (dst_img == NULL)
+    {
+        dst_img = (uint8_t *)heap_caps_malloc(dst_width * dst_height * src_channel * sizeof(uint8_t),
+                                              MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+        if (dst_img == NULL)
+        {
+            ESP_LOGE("Image Util", "Failed to apply for %dbytes(%dKB) memory in PSRAM",
+                     dst_width * dst_height * src_channel, (dst_width * dst_height * src_channel) / 1024);
+            return NULL;
+        }
+    }
+    int offset = 0;
+    int count = 0;
+    for (int i = y_min; i < y_max + 1; i++)
+    {
+        offset = i * src_width * src_channel;
+        memcpy(
+            dst_img + count * dst_width * src_channel,
+            src_img + x_min * src_channel + offset,
+            dst_width * src_channel * sizeof(uint8_t));
+        count += 1;
+    }
+    return dst_img;
+}
+
+void img_rgb888_draw_line(
+    uint8_t *src_img,
+    int src_width,
+    int src_height,
+    int x0,
+    int y0,
+    int x1,
+    int y1,
+    size_t line_size,
+    uint8_t *color)
+{
+    x0 = CLIP(x0, src_width - 1, 0);
+    x1 = CLIP(x1, src_width - 1, 0);
+    y0 = CLIP(y0, src_height - 1, 0);
+    y1 = CLIP(y1, src_height - 1, 0);
+
+    uint8_t c0 = color[0];
+    uint8_t c1 = color[1];
+    uint8_t c2 = color[2];
+
+    if ((y0 == y1) && (x0 == x1))
+    {
+        draw_point(src_img, src_width, src_height, x0, y0, line_size, c0, c1, c2);
+        return;
+    }
+    int x_start;
+    int x_end;
+    int y_start;
+    int y_end;
+    int current_x;
+    int current_y;
+
+    if (abs(y0 - y1) > abs(x0 - x1))
+    {
+        if (y0 < y1)
+        {
+            y_start = y0;
+            x_start = x0;
+            y_end = y1;
+            x_end = x1;
+        }
+        else
+        {
+            y_start = y1;
+            x_start = x1;
+            y_end = y0;
+            x_end = x0;
+        }
+        int w = x_end - x_start + 1;
+        int h = y_end - y_start + 1;
+        float dwh = (float)w / (float)h;
+        for (int i = y_start; i <= y_end; i++)
+        {
+            current_y = i;
+            current_x = (int)roundf(dwh * (float)(current_y - y_start + 1) + (float)x_start - 1.f);
+            draw_point(src_img, src_width, src_height, current_x, current_y, line_size, c0, c1, c2);
+        }
+    }
+    else
+     {
+         if (x0 < x1)
+         {
+             y_start = y0;
+             x_start = x0;
+             y_end = y1;
+             x_end = x1;
+         }
+         else
+         {
+             y_start = y1;
+             x_start = x1;
+             y_end = y0;
+             x_end = x0;
+         }
+        int w = x_end - x_start + 1;
+        int h = y_end - y_start + 1;
+        float dhw = (float)h / (float)w;
+        for (int i = x_start; i <= x_end; i++)
+        {
+            current_x = i;
+            current_y = (int)roundf(dhw * (float)(current_x - x_start + 1) + (float)y_start - 1.f);
+            draw_point(src_img, src_width, src_height, current_x, current_y, line_size, c0, c1, c2);
+        }
+     }
 }
