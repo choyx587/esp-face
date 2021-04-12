@@ -1,12 +1,12 @@
+.vscode
+.idea
+__pycache__
+bin
 build
+cmake-build-debug
 
 sdkconfig
 sdkconfig.old
 
-pnet_model.*
-rnet_model.*
-onet_model.*
-frmn_model.*
-
-cmake-build-debug
-.idea
+mnist_coefficient.cpp
+mnist_coefficient.hpp
